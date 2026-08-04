@@ -3,9 +3,11 @@
 # Not installable with pip, but still required:
 #   ffmpeg + ffprobe on PATH   frame sampling and chunk cutting
 #
-# `python cli.py --selfcheck` runs with none of this installed.
+# `python infer.py --selfcheck` runs with none of this installed.
 
 torch>=2.4
+torchvision                # Cosmos3-Nano's processor loads Qwen2VLImageProcessor, which requires this
+pillow                     # required by the same image processor
 transformers>=5.11        # Cosmos3OmniForConditionalGeneration
 accelerate>=0.26          # device_map="auto"
 av>=13                    # transformers' default video backend is pyav
