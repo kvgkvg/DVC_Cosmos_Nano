@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>dvc_cosmos_nano</title>
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#fff; --ink:#16181d; --muted:#697086; --line:#e3e6ec;
+  --accent:#0e9f6e; --bad:#e0435a; --chip:#eef0f5;
+}
+@media (prefers-color-scheme:dark){
+  :root{ --bg:#0f1116; --panel:#171a21; --ink:#e8eaf0; --muted:#98a0b5; --line:#272c38;
+         --accent:#3ddc97; --bad:#ff6b81; --chip:#222736; }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:32px 20px 80px}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 24px;font-size:14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}
+label{display:block;font-size:13px;font-weight:600;margin:14px 0 6px}
+label:first-child{margin-top:0}
+input[type=file],input[type=text]{width:100%;padding:9px 10px;border-radius:8px;
+  border:1px solid var(--line);background:var(--bg);color:var(--ink);font-size:14px}
+button{margin-top:16px;padding:10px 18px;border-radius:8px;border:none;
+  background:var(--accent);color:#04241a;font-weight:600;font-size:14px;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+.status{margin-top:14px;font-size:13px;color:var(--muted)}
+.status.error{color:var(--bad)}
+video{width:100%;border-radius:9px;background:#000;display:block;margin-top:18px}
+.live{margin-top:10px;border:1px solid var(--line);border-radius:9px;background:var(--panel);
+  padding:10px 12px;font-size:14px;min-height:44px}
+.live.silent{color:var(--muted);font-style:italic}
+.hand{font-weight:600;color:var(--accent)}
+details{margin-top:16px}
+summary{cursor:pointer;font-size:13px;color:var(--muted)}
+.cues{margin:8px 0 0;padding:0;list-style:none;max-height:280px;overflow:auto;
+  border:1px solid var(--line);border-radius:9px}
+.cues li{padding:7px 10px;border-top:1px solid var(--line);cursor:pointer;font-size:13px}
+.cues li:first-child{border-top:none}
+.cues li:hover{background:var(--chip)}
+.ts{display:block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:10.5px;color:var(--muted);margin-bottom:1px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>dvc_cosmos_nano</h1>
+  <p class="sub">Upload a video, get timestamped Cosmos3-Nano captions back.</p>
+
+  <div class="panel">
+    <form id="form">
+      <label for="video">Video file</label>
+      <input type="file" id="video" name="video" accept="video/*" required>
+      <label for="instruction">Instruction (optional)</label>
+      <input type="text" id="instruction" name="instruction"
+             placeholder="e.g. fold the towel and put it away">
+      <button type="submit" id="submit">Caption video</button>
+      <div class="status" id="status"></div>
+    </form>
+  </div>
+
+  <div id="result" style="display:none">
+    <video id="player" controls></video>
+    <div class="live idle" id="live">press play</div>
+    <details>
+      <summary>All captions</summary>
+      <ul class="cues" id="cues"></ul>
+    </details>
+  </div>
+</div>
+
+<script>
+const fmt = t => {
+  const m = Math.floor(t / 60), s = t - m * 60;
+  return String(m).padStart(2, '0') + ':' + s.toFixed(2).padStart(5, '0');
+};
+const esc = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const markRoles = s => esc(s).replace(/\[(left hand|right hand|both hands|ego)\]/g,
+                                     '<span class="hand">[$1]</span>');
+
+// Minimal SRT parser: index \n HH:MM:SS,mmm --> HH:MM:SS,mmm \n text \n\n
+function parseSrt(text) {
+  const blockRe = /(\d+)\s*\n(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*\n([\s\S]*?)(?=\n\s*\n|$)/g;
+  const cues = [];
+  let m;
+  while ((m = blockRe.exec(text)) !== null) {
+    const g = m.slice(1);
+    const start = (+g[1]) * 3600 + (+g[2]) * 60 + (+g[3]) + (+g[4]) / 1000;
+    const end = (+g[5]) * 3600 + (+g[6]) * 60 + (+g[7]) + (+g[8]) / 1000;
+    cues.push({ s: start, e: end, t: (g[9] || '').trim() });
+  }
+  return cues;
+}
+
+const form = document.getElementById('form');
+const statusEl = document.getElementById('status');
+const submitBtn = document.getElementById('submit');
+const resultEl = document.getElementById('result');
+const player = document.getElementById('player');
+const liveEl = document.getElementById('live');
+const cuesEl = document.getElementById('cues');
+
+let pollTimer = null;
+
+function setStatus(msg, isError) {
+  statusEl.textContent = msg;
+  statusEl.className = 'status' + (isError ? ' error' : '');
+}
+
+function renderResult(videoUrl, srt) {
+  const cues = parseSrt(srt);
+  player.src = videoUrl;
+  resultEl.style.display = 'block';
+
+  cuesEl.innerHTML = cues.length
+    ? cues.map(c => `<li data-s="${c.s}"><span class="ts">${fmt(c.s)} → ${fmt(c.e)}</span>${markRoles(c.t)}</li>`).join('')
+    : '<li>no captions parsed</li>';
+  cuesEl.querySelectorAll('li[data-s]').forEach(li =>
+    li.onclick = () => { player.currentTime = parseFloat(li.dataset.s); player.play(); });
+
+  const tick = () => {
+    const t = player.currentTime;
+    const cur = cues.find(c => t >= c.s && t < c.e);
+    liveEl.className = 'live' + (cur ? '' : ' silent');
+    liveEl.innerHTML = cur ? markRoles(cur.t) : '— no caption —';
+  };
+  player.ontimeupdate = tick;
+  player.onseeked = tick;
+}
+
+async function poll(jobId) {
+  const res = await fetch(`/api/jobs/${jobId}`);
+  const data = await res.json();
+  if (data.status === 'queued' || data.status === 'running') {
+    setStatus(`status: ${data.status}…`);
+    pollTimer = setTimeout(() => poll(jobId), 2000);
+    return;
+  }
+  submitBtn.disabled = false;
+  if (data.status === 'error') {
+    setStatus(`error: ${data.error}`, true);
+    return;
+  }
+  setStatus(`done — ${data.result.n_events} captions across ${data.result.n_chunks} chunk(s)`);
+  renderResult(data.video_url, data.result.pred);
+}
+
+form.onsubmit = async (ev) => {
+  ev.preventDefault();
+  if (pollTimer) clearTimeout(pollTimer);
+  submitBtn.disabled = true;
+  resultEl.style.display = 'none';
+  setStatus('uploading…');
+
+  const fd = new FormData();
+  fd.append('video', document.getElementById('video').files[0]);
+  fd.append('instruction', document.getElementById('instruction').value);
+
+  try {
+    const res = await fetch('/api/jobs', { method: 'POST', body: fd });
+    if (!res.ok) throw new Error(`upload failed: ${res.status}`);
+    const data = await res.json();
+    setStatus('queued…');
+    poll(data.job_id);
+  } catch (err) {
+    submitBtn.disabled = false;
+    setStatus(String(err), true);
+  }
+};
+</script>
+</body>
+</html>
